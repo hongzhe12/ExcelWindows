@@ -18,6 +18,13 @@
     <item row="0" column="0">
      <widget class="QTableWidget" name="tableWidget"/>
     </item>
+    <item row="1" column="0">
+     <widget class="QPushButton" name="pushButton">
+      <property name="text">
+       <string>写入数据库</string>
+      </property>
+     </widget>
+    </item>
    </layout>
   </widget>
   <widget class="QMenuBar" name="menubar">
@@ -26,7 +33,7 @@
      <x>0</x>
      <y>0</y>
      <width>571</width>
-     <height>33</height>
+     <height>26</height>
     </rect>
    </property>
   </widget>

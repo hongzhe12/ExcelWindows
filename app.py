@@ -3,10 +3,12 @@ import sys
 import pandas as pd
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QCoreApplication, QObject, QEvent, Slot
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTableWidgetItem,
-                               QFileDialog, QMessageBox)
+                               QFileDialog, QMessageBox, QDialog)
 
 from config_set import config_instance
+from input_form_dialog import InputFormDialog
 from ui_general_excel import Ui_MainWindow
+from sqlalchemy import create_engine
 
 
 class Worker(QObject):
@@ -55,7 +57,7 @@ class Worker(QObject):
 '''
 if hasattr(self, 'thread') and self.thread.isRunning():
             return
-            
+
 self.thread = QThread()
 self.worker = Worker(long_running_task, 10)  # 执行10秒的任务
 
@@ -140,6 +142,9 @@ class MyMainWindow(QMainWindow):
         last_path = config_instance.get('last_opened_file', None)
         if last_path:
             self.open_file(last_path)
+
+        # 连接写入数据库按钮 pyside6-uic general_excel.ui -o ui_general_excel.py
+        self.ui.pushButton.clicked.connect(self.to_mysql)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -270,6 +275,42 @@ class MyMainWindow(QMainWindow):
         QMessageBox.critical(self, "错误", message)
         if self.excel_thread:
             self.excel_thread = None
+
+    def to_mysql(self):
+        user = config_instance.get('user')
+        password = config_instance.get('password')
+        db_name = config_instance.get('db_name')
+        table_name = config_instance.get('table_name')
+        host = config_instance.get('host')
+        form_structure = [
+            {"label": "用户名", "type": "text", "default": user},
+            {"label": "密码", "type": "text", "default": password},
+            {"label": "数据库名称", "type": "text", "default": db_name},
+            {"label": "表名称", "type": "text", "default": table_name},
+            {"label": "主机地址", "type": "text", "default": host},
+        ]
+
+        dialog = InputFormDialog(form_structure, self)
+        if dialog.exec() == QDialog.Accepted:
+            values = dialog.get_input_values()
+            user = values[0]
+            password = values[1]
+            db_name = values[2]
+            table_name = values[3]
+            host = values[4]
+
+            config_instance.update(
+                {
+                    "user": user,
+                    "password": password,
+                    "db_name": db_name,
+                    "table_name": table_name,
+                    "host": host,
+                }, save=True
+            )
+
+            engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{db_name}')
+            self.df.to_sql(table_name, engine, if_exists='append', index=False)
 
 
 if __name__ == "__main__":
