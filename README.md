@@ -1,5 +1,6 @@
 
 # Excel数据处理与数据库写入工具
+![QQ_1748862620942](https://github.com/user-attachments/assets/4965cd24-25e0-4e28-96d6-72ad9a48c506)
 
 ## 一、项目概述
 本工具基于Python和PySide6开发，实现Excel文件的可视化加载、预览及分批次处理，并支持将数据写入MySQL数据库。具备以下核心功能：
