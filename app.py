@@ -3,11 +3,12 @@ import sys
 import pandas as pd
 from PySide6.QtCore import QThread, Signal, Qt, QTimer, QCoreApplication, QObject, QEvent, Slot
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTableWidgetItem,
-                               QFileDialog, QMessageBox, QDialog)
+                               QFileDialog, QMessageBox, QDialog, QTableWidget)
 
-from config_set import config_instance
-from input_form_dialog import InputFormDialog
-from ui_general_excel import Ui_MainWindow
+from text.compare_text import  fuzzy_match_column
+from utils.config_set import config_instance
+from utils.input_form_dialog import InputFormDialog
+from ui.ui_general_excel import Ui_MainWindow
 from sqlalchemy import create_engine
 
 
@@ -114,6 +115,46 @@ class EnterKeyFilter(QObject):
         return super().eventFilter(obj, event)
 
 
+class DataFrameLoader(QThread):
+    """简化的工作线程，用于加载DataFrame到表格"""
+    progress_updated = Signal(int)  # 进度信号(0-100)
+    row_loaded = Signal(int, list)  # 行加载信号(行号, 行数据)
+    loading_complete = Signal()  # 加载完成信号
+    error_occurred = Signal(str)  # 错误信号
+
+    def __init__(self, dataframe):
+        super().__init__()
+        self.dataframe = dataframe
+
+    def run(self):
+        """线程主方法"""
+        try:
+            total_rows = len(self.dataframe)
+            columns = self.dataframe.columns.tolist()
+
+            # 先发送列名
+            self.row_loaded.emit(-1, columns)
+
+            # 逐行加载数据
+            for row_idx in range(total_rows):
+                row_data = [
+                    str(self.dataframe.iloc[row_idx, col])
+                    if pd.notna(self.dataframe.iloc[row_idx, col])
+                    else ""
+                    for col in range(len(columns))
+                ]
+                self.row_loaded.emit(row_idx, row_data)
+
+                # 每10行更新一次进度
+                if row_idx % 10 == 0:
+                    progress = int((row_idx + 1) / total_rows * 100)
+                    self.progress_updated.emit(progress)
+
+            self.loading_complete.emit()
+
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
 class MyMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -131,6 +172,13 @@ class MyMainWindow(QMainWindow):
         self.current_row = 0
         self.is_preview = True  # 是否处于预览状态
 
+        # 已经选择的所在列名称
+        self.selected_headers = []
+
+        self.df_thread = None
+        self.df_worker = None
+
+
         # **新增：设置状态栏样式表（全局修改颜色）**
         self.statusBar().setStyleSheet("""
                            QStatusBar {
@@ -138,13 +186,101 @@ class MyMainWindow(QMainWindow):
                                font-weight: bold; /* 加粗 */
                            }
                        """)
+
         # 加载上次的文件
         last_path = config_instance.get('last_opened_file', None)
         if last_path:
             self.open_file(last_path)
 
-        # 连接写入数据库按钮 pyside6-uic general_excel.ui -o ui_general_excel.py
+        # 连接选择变化信号到自定义槽函数
+        self.ui.tableWidget.selectionModel().selectionChanged.connect(self.update_selected_headers)
+
+        # 连接写入数据库按钮
         self.ui.pushButton.clicked.connect(self.to_mysql)
+
+        # 连接匹配按钮
+        self.ui.compare.clicked.connect(self.compare_clicked)
+
+    # ----------------------------加载df----------------------------
+    # 添加一个加载方法
+    def load_dataframe_safely(self, df):
+        """安全加载DataFrame到表格"""
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            QMessageBox.warning(self, "警告", "无效的DataFrame数据")
+            return
+
+        # 停止任何正在运行的线程
+        if hasattr(self, 'loader_thread') and self.loader_thread.isRunning():
+            self.loader_thread.quit()
+            self.loader_thread.wait()
+
+        # 创建并启动线程
+        self.loader_thread = DataFrameLoader(df)
+
+        # 连接信号
+        self.loader_thread.row_loaded.connect(self._update_table_row)
+        self.loader_thread.progress_updated.connect(self._update_progress)
+        self.loader_thread.loading_complete.connect(self._loading_finished)
+        self.loader_thread.error_occurred.connect(self._loading_error)
+
+        # 准备表格
+        self.ui.tableWidget.clear()
+        self.ui.tableWidget.setRowCount(len(df))
+        self.ui.tableWidget.setColumnCount(len(df.columns))
+
+        # 显示加载状态
+        self.statusBar().showMessage("正在加载数据...", 0)
+
+        # 启动线程
+        self.loader_thread.start()
+
+    def _update_table_row(self, row_idx, row_data):
+        """更新表格行数据"""
+        if row_idx == -1:  # 这是列名
+            self.ui.tableWidget.setHorizontalHeaderLabels(row_data)
+        else:
+            for col_idx, value in enumerate(row_data):
+                item = QTableWidgetItem(value)
+                # 设置数字右对齐
+                if value.replace('.', '', 1).isdigit():
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.ui.tableWidget.setItem(row_idx, col_idx, item)
+
+        # 处理事件循环，保持UI响应
+        QCoreApplication.processEvents()
+
+    def _update_progress(self, progress):
+        """更新进度"""
+        self.statusBar().showMessage(f"加载进度: {progress}%", 0)
+
+    def _loading_finished(self):
+        """加载完成处理"""
+        self.ui.tableWidget.resizeColumnsToContents()
+        self.statusBar().showMessage("数据加载完成", 3000)
+        self.loader_thread.quit()
+
+    def _loading_error(self, error_msg):
+        """加载错误处理"""
+        self.statusBar().showMessage("加载出错", 3000)
+        QMessageBox.critical(self, "错误", f"加载数据时出错:\n{error_msg}")
+        if hasattr(self, 'loader_thread'):
+            self.loader_thread.quit()
+
+    # ----------------------------加载df end----------------------------
+
+    def compare_clicked(self):
+        length = len(self.selected_headers)
+        print(length,self.selected_headers)
+        if length == 2:
+            df_result = fuzzy_match_column(
+                self.df,
+                source_col=self.selected_headers[0],
+                candidate_col=self.selected_headers[1]
+            )
+
+            # 加载新的DataFrame
+            self.load_dataframe_safely(df_result)
+
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -312,8 +448,26 @@ class MyMainWindow(QMainWindow):
             engine = create_engine(f'mysql+pymysql://{user}:{password}@{host}/{db_name}')
             self.df.to_sql(table_name, engine, if_exists='append', index=False)
 
+    # 获取选中所在列的表头
+    def update_selected_headers(self):
+        # 获取选中的列索引
+        selected_columns = set()
+        for index in self.ui.tableWidget.selectedIndexes():
+            selected_columns.add(index.column())
+
+        # 获取水平表头
+        header = self.ui.tableWidget.horizontalHeader()
+
+        # 获取选中列的表头文本
+        for col in selected_columns:
+            if col < header.count():  # 确保索引有效
+                header_name = header.model().headerData(col, Qt.Horizontal)
+                if header_name not in self.selected_headers:
+                    self.selected_headers.append(header_name)
+
 
 if __name__ == "__main__":
+    # pyside6-uic general_excel.ui -o ui_general_excel.py
     app = QApplication(sys.argv)
     window = MyMainWindow()
     window.show()
